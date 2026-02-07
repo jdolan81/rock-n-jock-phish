@@ -22,6 +22,29 @@ const decodeGameState = (encoded: string): Game | null => {
   }
 };
 
+// --- Helper: Calculate completion (x/10 fields filled) ---
+const calculateCompletion = (picks: SongPicks): number => {
+  let count = 0;
+  
+  // 5 main picks
+  if (picks.opener) count++;
+  if (picks.set1Closer) count++;
+  if (picks.set2Opener) count++;
+  if (picks.set2Closer) count++;
+  if (picks.encore) count++;
+  
+  // 2 wildcards
+  if (picks.wildcards[0]) count++;
+  if (picks.wildcards[1]) count++;
+  
+  // 3 Rock n Jock fields
+  if (picks.rockNJock.song) count++;
+  if (picks.rockNJock.set) count++;
+  if (picks.rockNJock.position > 0) count++;
+  
+  return count;
+};
+
 // --- View Models ---
 const useGameViewModel = () => {
   const [insights, setInsights] = useState<SongInsight[]>([]);
@@ -77,13 +100,12 @@ const useGameViewModel = () => {
       players: [],
       setlist: { set1: [], set2: [], encore: [] },
       status: 'lobby',
-      venue
+      venue,
+      isLocked: false, // NEW: Start unlocked
     };
     setGame(newGame);
     
-    // HYBRID APPROACH: Load songs immediately, then update with recent stats
     const loadSongs = async () => {
-      // Phase 1: Instant autocomplete with all-time stats
       const allSongs = await fetchAllSongs();
       if (allSongs.length > 0) {
         setInsights(allSongs);
@@ -91,7 +113,6 @@ const useGameViewModel = () => {
         console.log('✅ Phase 1 complete: Autocomplete ready with all-time stats');
       }
       
-      // Phase 2: Background update with recent tour stats (last 3 months)
       const recentStats = await fetchRecentTourStats();
       if (recentStats.length > 0) {
         setInsights(recentStats);
@@ -105,6 +126,11 @@ const useGameViewModel = () => {
 
   const addPlayer = (name: string) => {
     if (!game) return;
+    if (game.isLocked) {
+      alert('Game is locked! Cannot add players.');
+      return;
+    }
+    
     const newPlayer: Player = {
       id: crypto.randomUUID(),
       name,
@@ -131,11 +157,49 @@ const useGameViewModel = () => {
     setGame({ ...game, players: [...game.players, newPlayer] });
   };
 
+  const removePlayer = (playerId: string) => {
+    if (!game) return;
+    if (game.isLocked) {
+      alert('Game is locked! Cannot remove players.');
+      return;
+    }
+    
+    if (window.confirm('Remove this player?')) {
+      setGame({ 
+        ...game, 
+        players: game.players.filter(p => p.id !== playerId) 
+      });
+    }
+  };
+
   const updatePicks = (playerId: string, picks: SongPicks) => {
     if (!game) return;
+    if (game.isLocked) {
+      alert('Game is locked! Cannot edit picks.');
+      return;
+    }
+    
     setGame({
       ...game,
       players: game.players.map(p => p.id === playerId ? { ...p, picks } : p)
+    });
+  };
+
+  const lockGame = () => {
+    if (!game) return;
+    
+    // Check all players are 10/10
+    const allComplete = game.players.every(p => calculateCompletion(p.picks) === 10);
+    if (!allComplete) {
+      alert('All players must complete all 10 picks before locking!');
+      return;
+    }
+    
+    setGame({
+      ...game,
+      isLocked: true,
+      lockedAt: new Date().toISOString(),
+      lockedPlayerIds: game.players.map(p => p.id)
     });
   };
 
@@ -166,8 +230,8 @@ const useGameViewModel = () => {
 
   const isLocked = useMemo(() => {
     if (!game) return false;
-    return new Date() > new Date(game.lockTime);
-  }, [game?.lockTime]);
+    return game.isLocked;
+  }, [game?.isLocked]);
 
   const generateShareLink = () => {
     if (!game) return "";
@@ -180,8 +244,10 @@ const useGameViewModel = () => {
     insights,
     loadingInsights,
     createGame, 
-    addPlayer, 
+    addPlayer,
+    removePlayer,
     updatePicks, 
+    lockGame,
     updateSetlist, 
     finalizeScores, 
     isLocked, 
@@ -209,7 +275,6 @@ const App: React.FC = () => {
   const [isCalculating, setIsCalculating] = useState(false);
   const [newPlayerName, setNewPlayerName] = useState('');
   
-  // Game Creation Form State
   const [showDate, setShowDate] = useState(new Date().toISOString().split('T')[0]);
   const [venueInfo, setVenueInfo] = useState<string>('');
   const [isFetchingVenue, setIsFetchingVenue] = useState(false);
@@ -220,7 +285,6 @@ const App: React.FC = () => {
     }
   }, [vm.game, currentView]);
 
-  // Automatically fetch venue info when showDate changes
   useEffect(() => {
     if (currentView === View.CREATE_GAME && showDate) {
       const getVenue = async () => {
@@ -326,59 +390,130 @@ const App: React.FC = () => {
     </Layout>
   );
 
-  const renderLobby = () => (
-    <Layout 
-      title="Lobby" 
-      leftAction={<button onClick={handleReset}>New</button>}
-      rightAction={<button onClick={handleCopyLink}>{copyFeedback ? "Copied" : "Share"}</button>}
-    >
-      {vm.game?.venue && (
-        <div className="mb-4 text-center">
-          <h3 className="text-xs font-bold text-gray-400 uppercase tracking-widest">{vm.game.lockTime}</h3>
-          <p className="text-sm font-medium text-gray-600">{vm.game.venue}</p>
+  const renderLobby = () => {
+    const allComplete = vm.game?.players.every(p => calculateCompletion(p.picks) === 10) ?? false;
+    const incompletePlayers = vm.game?.players.filter(p => calculateCompletion(p.picks) < 10) ?? [];
+    
+    return (
+      <Layout 
+        title="Lobby" 
+        leftAction={<button onClick={handleReset}>New</button>}
+        rightAction={<button onClick={handleCopyLink}>{copyFeedback ? "Copied" : "Share"}</button>}
+      >
+        {vm.game?.venue && (
+          <div className="mb-4 text-center">
+            <h3 className="text-xs font-bold text-gray-400 uppercase tracking-widest">{vm.game.lockTime}</h3>
+            <p className="text-sm font-medium text-gray-600">{vm.game.venue}</p>
+            {vm.game.isLocked && (
+              <div className="mt-2 inline-block bg-red-100 text-red-700 px-3 py-1 rounded-full text-xs font-bold">
+                🔒 LOCKED
+              </div>
+            )}
+          </div>
+        )}
+        
+        <ListSection title="Players">
+          {vm.game?.players.map(p => {
+            const completion = calculateCompletion(p.picks);
+            const isComplete = completion === 10;
+            
+            return (
+              <div key={p.id} className="flex items-center justify-between p-4 border-b border-gray-100 last:border-0 bg-white">
+                <div className="flex-1" onClick={() => {
+                  setActivePlayerId(p.id);
+                  setCurrentView(View.PICKS);
+                }}>
+                  <div className="flex items-center space-x-3">
+                    <span className="text-lg font-bold">{p.name}</span>
+                    {isComplete ? (
+                      <span className="bg-green-100 text-green-700 px-2 py-0.5 rounded-full text-xs font-bold">✅ Ready</span>
+                    ) : (
+                      <span className="bg-yellow-100 text-yellow-700 px-2 py-0.5 rounded-full text-xs font-bold">⏳ {completion}/10</span>
+                    )}
+                  </div>
+                  <div className="text-sm text-gray-500 mt-1">
+                    {vm.game?.status === 'completed' ? `${p.score} pts` : "Tap to edit picks"}
+                  </div>
+                </div>
+                {!vm.game?.isLocked && (
+                  <button 
+                    onClick={() => vm.removePlayer(p.id)}
+                    className="ml-4 text-red-500 hover:text-red-700 text-sm font-bold"
+                  >
+                    Remove
+                  </button>
+                )}
+              </div>
+            );
+          })}
+          
+          {!vm.game?.isLocked && (
+            <IOSInput 
+              label="Add Player" 
+              placeholder="Enter Name" 
+              value={newPlayerName} 
+              onChange={setNewPlayerName} 
+              suffix={
+                <button 
+                  onClick={() => { 
+                    if(newPlayerName) { 
+                      vm.addPlayer(newPlayerName); 
+                      setNewPlayerName(''); 
+                    } 
+                  }} 
+                  className="text-[#007AFF] font-bold"
+                >
+                  Add
+                </button>
+              }
+            />
+          )}
+        </ListSection>
+        
+        <div className="space-y-3 px-2">
+          {!vm.game?.isLocked && (
+            <>
+              {!allComplete && incompletePlayers.length > 0 && (
+                <div className="text-center text-sm text-gray-500 mb-2">
+                  Waiting on: {incompletePlayers.map(p => `${p.name} (${10 - calculateCompletion(p.picks)} fields)`).join(', ')}
+                </div>
+              )}
+              
+              <PrimaryButton 
+                label="Lock Game" 
+                disabled={!allComplete || (vm.game?.players.length ?? 0) === 0}
+                onClick={vm.lockGame} 
+              />
+              
+              {allComplete && (
+                <div className="text-center text-xs text-gray-500">
+                  Locking freezes players + picks for live scoring
+                </div>
+              )}
+            </>
+          )}
+          
+          {vm.game?.isLocked && vm.game?.status !== 'completed' && (
+            <PrimaryButton 
+              label={isCalculating ? "Calculating..." : "Calculate & View Results"}
+              disabled={isCalculating}
+              onClick={handleCalculateResults} 
+            />
+          )}
+          
+          {vm.game?.status === 'completed' && (
+            <PrimaryButton label="View Results" onClick={() => setCurrentView(View.RESULTS)} />
+          )}
         </div>
-      )}
-      
-      <ListSection title="Players">
-        {vm.game?.players.map(p => (
-          <ListItem 
-            key={p.id} 
-            label={p.name} 
-            value={vm.game?.status === 'completed' ? `${p.score} pts` : "View Picks"} 
-            onClick={() => {
-              setActivePlayerId(p.id);
-              setCurrentView(View.PICKS);
-            }}
-          />
-        ))}
-        <IOSInput 
-          label="Add Player" 
-          placeholder="Enter Name" 
-          value={newPlayerName} 
-          onChange={setNewPlayerName} 
-          suffix={<button onClick={() => { if(newPlayerName) { vm.addPlayer(newPlayerName); setNewPlayerName(''); } }} className="text-[#007AFF] font-bold">Add</button>}
-        />
-      </ListSection>
-      
-      <div className="space-y-3 px-2">
-        {vm.game?.status !== 'completed' && (
-          <PrimaryButton 
-            label={isCalculating ? "Calculating..." : "Calculate & View Results"}
-            disabled={isCalculating || !vm.game?.players.length}
-            onClick={handleCalculateResults} 
-          />
-        )}
-        {vm.game?.status === 'completed' && (
-          <PrimaryButton label="View Results" onClick={() => setCurrentView(View.RESULTS)} />
-        )}
-      </div>
-    </Layout>
-  );
+      </Layout>
+    );
+  };
 
   const renderPicks = () => {
     const player = vm.game?.players.find(p => p.id === activePlayerId);
     if (!player) return null;
 
+    const completion = calculateCompletion(player.picks);
     const topInsights = [...vm.insights].sort((a, b) => b.probability - a.probability).slice(0, 5);
 
     return (
@@ -386,21 +521,33 @@ const App: React.FC = () => {
         title={`${player.name}'s Picks`} 
         leftAction={<button onClick={() => setCurrentView(View.LOBBY)}>Lobby</button>}
         rightAction={
-          <button 
-            onClick={() => vm.refreshInsights(vm.game!.lockTime)}
-            disabled={vm.loadingInsights}
-            className="text-xs font-bold uppercase"
-          >
-            {vm.loadingInsights ? "..." : "Refresh Stats"}
-          </button>
+          !vm.game?.isLocked ? (
+            <button 
+              onClick={() => vm.refreshInsights(vm.game!.lockTime)}
+              disabled={vm.loadingInsights}
+              className="text-xs font-bold uppercase"
+            >
+              {vm.loadingInsights ? "..." : "Refresh Stats"}
+            </button>
+          ) : undefined
         }
       >
-        {vm.loadingInsights ? (
+        {vm.game?.isLocked && (
+          <div className="mb-4 bg-red-50 border border-red-200 rounded-xl p-3">
+            <p className="text-red-700 text-sm font-medium text-center">🔒 Game locked - picks cannot be edited</p>
+          </div>
+        )}
+        
+        <div className="mb-4 bg-blue-50 border border-blue-200 rounded-xl p-3">
+          <p className="text-blue-700 text-sm font-bold text-center">Progress: {completion} / 10</p>
+        </div>
+
+        {!vm.game?.isLocked && vm.loadingInsights ? (
           <div className="flex items-center justify-center p-6 space-x-3 bg-white rounded-xl mb-6 shadow-sm">
             <div className="w-5 h-5 border-2 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
             <span className="text-sm font-medium text-gray-500">Retrieving tour probabilities...</span>
           </div>
-        ) : vm.insights.length > 0 && topInsights.some(i => i.probability > 0) ? (
+        ) : !vm.game?.isLocked && vm.insights.length > 0 && topInsights.some(i => i.probability > 0) ? (
           <ListSection title="TOUR PREDICTION CHEAT SHEET">
             {topInsights.map((insight, idx) => (
               <ListItem 
@@ -415,18 +562,14 @@ const App: React.FC = () => {
                   </div>
                 }
                 onClick={() => {
-                  if (insight.isFrequentOpener && !player.picks.opener) {
+                  if (insight.isFrequentOpener && !player.picks.opener && !vm.game?.isLocked) {
                     vm.updatePicks(player.id, { ...player.picks, opener: insight.song });
                   }
                 }}
               />
             ))}
           </ListSection>
-        ) : (
-          <div className="p-4 bg-blue-50 border border-blue-100 rounded-xl mb-6">
-            <p className="text-blue-700 text-xs font-medium text-center">Start typing to search {vm.insights.length} Phish songs! Click "Refresh Stats" for probability data.</p>
-          </div>
-        )}
+        ) : null}
 
         <ListSection title="MAIN SELECTIONS">
           <AutocompleteInput 
@@ -434,35 +577,40 @@ const App: React.FC = () => {
             placeholder="Search songs..." 
             value={player.picks.opener} 
             insights={vm.insights}
-            onChange={(v) => vm.updatePicks(player.id, { ...player.picks, opener: v })} 
+            onChange={(v) => !vm.game?.isLocked && vm.updatePicks(player.id, { ...player.picks, opener: v })}
+            disabled={vm.game?.isLocked}
           />
           <AutocompleteInput 
             label="S1 Closer" 
             placeholder="Search songs..." 
             value={player.picks.set1Closer} 
             insights={vm.insights}
-            onChange={(v) => vm.updatePicks(player.id, { ...player.picks, set1Closer: v })} 
+            onChange={(v) => !vm.game?.isLocked && vm.updatePicks(player.id, { ...player.picks, set1Closer: v })}
+            disabled={vm.game?.isLocked}
           />
           <AutocompleteInput 
             label="S2 Opener" 
             placeholder="Search songs..." 
             value={player.picks.set2Opener} 
             insights={vm.insights}
-            onChange={(v) => vm.updatePicks(player.id, { ...player.picks, set2Opener: v })} 
+            onChange={(v) => !vm.game?.isLocked && vm.updatePicks(player.id, { ...player.picks, set2Opener: v })}
+            disabled={vm.game?.isLocked}
           />
           <AutocompleteInput 
             label="S2 Closer" 
             placeholder="Search songs..." 
             value={player.picks.set2Closer} 
             insights={vm.insights}
-            onChange={(v) => vm.updatePicks(player.id, { ...player.picks, set2Closer: v })} 
+            onChange={(v) => !vm.game?.isLocked && vm.updatePicks(player.id, { ...player.picks, set2Closer: v })}
+            disabled={vm.game?.isLocked}
           />
           <AutocompleteInput 
             label="Encore" 
             placeholder="Search songs..." 
             value={player.picks.encore} 
             insights={vm.insights}
-            onChange={(v) => vm.updatePicks(player.id, { ...player.picks, encore: v })} 
+            onChange={(v) => !vm.game?.isLocked && vm.updatePicks(player.id, { ...player.picks, encore: v })}
+            disabled={vm.game?.isLocked}
           />
         </ListSection>
 
@@ -472,14 +620,16 @@ const App: React.FC = () => {
             placeholder="Any Phish song" 
             value={player.picks.wildcards[0]} 
             insights={vm.insights}
-            onChange={(v) => vm.updatePicks(player.id, { ...player.picks, wildcards: [v, player.picks.wildcards[1]] })} 
+            onChange={(v) => !vm.game?.isLocked && vm.updatePicks(player.id, { ...player.picks, wildcards: [v, player.picks.wildcards[1]] })}
+            disabled={vm.game?.isLocked}
           />
           <AutocompleteInput 
             label="Wildcard 2" 
             placeholder="Any Phish song" 
             value={player.picks.wildcards[1]} 
             insights={vm.insights}
-            onChange={(v) => vm.updatePicks(player.id, { ...player.picks, wildcards: [player.picks.wildcards[0], v] })} 
+            onChange={(v) => !vm.game?.isLocked && vm.updatePicks(player.id, { ...player.picks, wildcards: [player.picks.wildcards[0], v] })}
+            disabled={vm.game?.isLocked}
           />
         </ListSection>
 
@@ -495,10 +645,11 @@ const App: React.FC = () => {
             placeholder="Search songs..." 
             value={player.picks.rockNJock.song} 
             insights={vm.insights}
-            onChange={(v) => vm.updatePicks(player.id, { 
+            onChange={(v) => !vm.game?.isLocked && vm.updatePicks(player.id, { 
               ...player.picks, 
               rockNJock: { ...player.picks.rockNJock, song: v } 
-            })} 
+            })}
+            disabled={vm.game?.isLocked}
           />
           
           <div className="flex space-x-3">
@@ -506,11 +657,12 @@ const App: React.FC = () => {
               <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1 ml-4">Set</label>
               <select
                 value={player.picks.rockNJock.set}
-                onChange={(e) => vm.updatePicks(player.id, { 
+                onChange={(e) => !vm.game?.isLocked && vm.updatePicks(player.id, { 
                   ...player.picks, 
                   rockNJock: { ...player.picks.rockNJock, set: e.target.value as '1' | '2' | '' } 
                 })}
-                className="w-full px-4 py-3 bg-white border border-gray-200 rounded-xl text-gray-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                disabled={vm.game?.isLocked}
+                className="w-full px-4 py-3 bg-white border border-gray-200 rounded-xl text-gray-900 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-gray-100 disabled:text-gray-400"
               >
                 <option value="">Select Set</option>
                 <option value="1">Set 1</option>
@@ -526,18 +678,23 @@ const App: React.FC = () => {
                 max="20"
                 placeholder="1-20"
                 value={player.picks.rockNJock.position || ''}
-                onChange={(e) => vm.updatePicks(player.id, { 
+                onChange={(e) => !vm.game?.isLocked && vm.updatePicks(player.id, { 
                   ...player.picks, 
                   rockNJock: { ...player.picks.rockNJock, position: parseInt(e.target.value) || 0 } 
                 })}
-                className="w-full px-4 py-3 bg-white border border-gray-200 rounded-xl text-gray-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                disabled={vm.game?.isLocked}
+                className="w-full px-4 py-3 bg-white border border-gray-200 rounded-xl text-gray-900 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-gray-100 disabled:text-gray-400"
               />
             </div>
           </div>
         </ListSection>
 
         <div className="px-2">
-          <PrimaryButton label="Done" onClick={() => setCurrentView(View.LOBBY)} />
+          <PrimaryButton 
+            label="Done" 
+            onClick={() => setCurrentView(View.LOBBY)}
+            disabled={vm.game?.isLocked && completion < 10}
+          />
         </div>
       </Layout>
     );
