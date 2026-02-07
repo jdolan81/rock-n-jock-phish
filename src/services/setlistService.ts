@@ -1,7 +1,8 @@
 import { Setlist } from '../types';
 
 const PHISH_NET_API = '/api';
-const API_KEY = '8785ADC8148C07242439';
+const API_KEY = import.meta.env.VITE_PHISH_API_KEY || '';
+
 
 export interface SongInsight {
   song: string;
