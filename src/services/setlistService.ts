@@ -445,7 +445,7 @@ export const fetchTourInsights = async (targetDate: string): Promise<SongInsight
       const parsed = parseSetlistData(show.setlistdata);
       const allSongs = [...parsed.set1, ...parsed.set2, ...parsed.encore];
       
-      allSongs.forEach((song, idx) => {
+      allSongs.forEach(song => {
         if (!song) return;
         
         const existing = songStats.get(song) || {
