@@ -101,7 +101,7 @@ const useGameViewModel = () => {
       setlist: { set1: [], set2: [], encore: [] },
       status: 'lobby',
       venue,
-      isLocked: false, // NEW: Start unlocked
+      isLocked: false,
     };
     setGame(newGame);
     
@@ -188,7 +188,6 @@ const useGameViewModel = () => {
   const lockGame = () => {
     if (!game) return;
     
-    // Check all players are 10/10
     const allComplete = game.players.every(p => calculateCompletion(p.picks) === 10);
     if (!allComplete) {
       alert('All players must complete all 10 picks before locking!');
@@ -253,7 +252,8 @@ const useGameViewModel = () => {
     isLocked, 
     generateShareLink,
     resetGame,
-    refreshInsights
+    refreshInsights,
+    setGame
   };
 };
 
@@ -274,6 +274,9 @@ const App: React.FC = () => {
   const [copyFeedback, setCopyFeedback] = useState(false);
   const [isCalculating, setIsCalculating] = useState(false);
   const [newPlayerName, setNewPlayerName] = useState('');
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [refreshCooldown, setRefreshCooldown] = useState(0);
+  const [refreshError, setRefreshError] = useState<string | null>(null);
   
   const [showDate, setShowDate] = useState(new Date().toISOString().split('T')[0]);
   const [venueInfo, setVenueInfo] = useState<string>('');
@@ -297,41 +300,130 @@ const App: React.FC = () => {
     }
   }, [showDate, currentView]);
 
-  const handleCopyLink = () => {
-    const link = vm.generateShareLink();
-    navigator.clipboard.writeText(link).then(() => {
-      setCopyFeedback(true);
-      setTimeout(() => setCopyFeedback(false), 2000);
-    });
-  };
-
-  const handleCalculateResults = async () => {
-    if (!vm.game) return;
+const handleCalculateResults = async () => {
+  if (!vm.game) return;
+  
+  setIsCalculating(true);
+  
+  try {
+    const showDate = vm.game.lockTime;
+    console.log('🎯 Fetching setlist for show date:', showDate);
     
-    setIsCalculating(true);
+    const result = await fetchLiveSetlist(showDate);
+    console.log('📥 Setlist result:', result);
+    
+    if (result && result.setlist) {
+      console.log('📊 Setlist found:', result.setlist);
+      
+      // Calculate scores for all players
+      const updatedPlayers = vm.game.players.map(p => {
+        const { score, breakdown } = scoring.calculatePlayerScore(p.picks, result.setlist);
+        console.log(`Player ${p.name}: ${score} points`, breakdown);
+        return { ...p, score, breakdown };
+      });
+      
+      // Set initial status
+      const now = new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+      const showStatus = result.setlist.encore.length > 0 ? 'final' : 'live';
+      
+      // Update game with scores AND setlist
+      vm.setGame({
+        ...vm.game,
+        players: updatedPlayers,
+        setlist: result.setlist,
+        lastRefreshed: now,
+        showStatus: showStatus as 'live' | 'final',
+        status: 'completed'
+      });
+      
+      setCurrentView(View.RESULTS);
+    } else {
+      alert('Could not fetch setlist from Phish.net. The show may not have occurred yet or data is unavailable.');
+    }
+  } catch (error) {
+    console.error('Error calculating results:', error);
+    alert('Error fetching setlist. Please try again.');
+  } finally {
+    setIsCalculating(false);
+  }
+};
+
+  const handleRefresh = async () => {
+    if (!vm.game || isRefreshing || refreshCooldown > 0) return;
+    
+    setIsRefreshing(true);
+    setRefreshError(null);
     
     try {
       const showDate = vm.game.lockTime;
-      console.log('🎯 Fetching setlist for show date:', showDate);
+      console.log('🔄 Refreshing setlist for:', showDate);
       
       const result = await fetchLiveSetlist(showDate);
-      console.log('📥 Setlist result:', result);
       
       if (result && result.setlist) {
-        vm.finalizeScores(result.setlist);
-        setCurrentView(View.RESULTS);
+        const oldSetlist = vm.game.setlist;
+        const newSetlist = result.setlist;
+        
+        // Check if there are new songs
+        const oldTotal = oldSetlist.set1.length + oldSetlist.set2.length + oldSetlist.encore.length;
+        const newTotal = newSetlist.set1.length + newSetlist.set2.length + newSetlist.encore.length;
+        
+        const now = new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+        
+        if (newTotal > oldTotal) {
+          console.log('🎉 New songs found!', newTotal - oldTotal, 'new songs');
+          vm.finalizeScores(newSetlist);
+          
+          // Update last refreshed time and status
+          vm.setGame({
+            ...vm.game,
+            lastRefreshed: now,
+            showStatus: newSetlist.encore.length > 0 ? 'final' : 'live',
+            setlist: newSetlist
+          });
+        } else {
+          console.log('ℹ️ No new songs yet');
+          setRefreshError('No new songs yet.');
+          
+          // Still update last refreshed time
+          vm.setGame({
+            ...vm.game,
+            lastRefreshed: now
+          });
+        }
+        
+        // Start 20-second cooldown
+        setRefreshCooldown(20);
+        const interval = setInterval(() => {
+          setRefreshCooldown(prev => {
+            if (prev <= 1) {
+              clearInterval(interval);
+              return 0;
+            }
+            return prev - 1;
+          });
+        }, 1000);
+        
       } else {
-        alert('Could not fetch setlist from Phish.net. The show may not have occurred yet or data is unavailable.');
+        setRefreshError("Couldn't refresh. Try again.");
       }
     } catch (error) {
-      console.error('Error calculating results:', error);
-      alert('Error fetching setlist. Please try again.');
+      console.error('❌ Error refreshing:', error);
+      setRefreshError("Couldn't refresh. Try again.");
     } finally {
-      setIsCalculating(false);
+      setIsRefreshing(false);
     }
   };
 
-  const handleReset = () => {
+const handleCopyLink = () => {
+  const link = vm.generateShareLink();
+  navigator.clipboard.writeText(link).then(() => {
+    setCopyFeedback(true);
+    setTimeout(() => setCopyFeedback(false), 2000);
+  });
+};
+
+const handleReset = () => {  
     if (vm.resetGame()) {
       setVenueInfo('');
       setCurrentView(View.CREATE_GAME);
@@ -703,17 +795,63 @@ const App: React.FC = () => {
   const renderResults = () => {
     const sortedPlayers = [...(vm.game?.players || [])].sort((a, b) => b.score - a.score);
     const winner = sortedPlayers[0];
+    const isLive = vm.game?.showStatus === 'live';
+    const isFinal = vm.game?.showStatus === 'final';
+    
+    // Determine refresh button label
+    let refreshLabel = 'Refresh';
+    if (isFinal) {
+      refreshLabel = 'Final';
+    } else if (isRefreshing) {
+      refreshLabel = 'Refreshing...';
+    } else if (refreshCooldown > 0) {
+      refreshLabel = `Refresh (${refreshCooldown}s)`;
+    }
     
     return (
       <Layout 
         title="Results" 
         leftAction={<button onClick={() => setCurrentView(View.LOBBY)}>Lobby</button>}
+        rightAction={
+          <button 
+            onClick={handleRefresh}
+            disabled={isRefreshing || refreshCooldown > 0 || isFinal}
+            className={`text-xs font-bold uppercase ${
+              isFinal ? 'text-gray-400' : isRefreshing || refreshCooldown > 0 ? 'text-gray-400' : 'text-blue-500'
+            }`}
+          >
+            {refreshLabel}
+          </button>
+        }
       >
+        {/* Status text */}
+        {vm.game?.lastRefreshed && (
+          <div className="text-center text-xs text-gray-500 mb-2">
+            Last updated: {vm.game.lastRefreshed}
+          </div>
+        )}
+        {refreshError && (
+          <div className="text-center text-xs text-orange-600 mb-2">
+            {refreshError}
+          </div>
+        )}
+        
+        {/* Winner banner or Live Results */}
         {winner && (
-          <div className="mb-6 text-center bg-gradient-to-br from-yellow-50 to-yellow-100 p-6 rounded-2xl border-2 border-yellow-300">
-            <div className="text-6xl mb-2">🏆</div>
-            <h2 className="text-2xl font-black text-gray-900">{winner.name} Wins!</h2>
-            <p className="text-3xl font-black text-yellow-600 mt-1">{winner.score} pts</p>
+          <div className={`mb-6 text-center p-6 rounded-2xl border-2 ${
+            isFinal 
+              ? 'bg-gradient-to-br from-yellow-50 to-yellow-100 border-yellow-300'
+              : 'bg-gradient-to-br from-blue-50 to-blue-100 border-blue-300'
+          }`}>
+            <div className="text-6xl mb-2">{isFinal ? '🏆' : '📊'}</div>
+            <h2 className="text-2xl font-black text-gray-900">
+              {isFinal ? `${winner.name} Wins!` : 'Live Results'}
+            </h2>
+            <p className={`text-3xl font-black mt-1 ${
+              isFinal ? 'text-yellow-600' : 'text-blue-600'
+            }`}>
+              {winner.score} pts
+            </p>
           </div>
         )}
 

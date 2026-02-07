@@ -44,8 +44,11 @@ export interface Game {
   setlist: Setlist;
   status: 'lobby' | 'active' | 'completed';
   venue?: string;
-  // NEW: Lock mechanism
+  // Phase 1: Lock mechanism
   isLocked: boolean;
   lockedAt?: string;
   lockedPlayerIds?: string[];
+  // Phase 2: Live refresh
+  lastRefreshed?: string;
+  showStatus?: 'live' | 'final';
 }
