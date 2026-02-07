@@ -795,7 +795,6 @@ const handleReset = () => {
   const renderResults = () => {
     const sortedPlayers = [...(vm.game?.players || [])].sort((a, b) => b.score - a.score);
     const winner = sortedPlayers[0];
-    const isLive = vm.game?.showStatus === 'live';
     const isFinal = vm.game?.showStatus === 'final';
     
     // Determine refresh button label
