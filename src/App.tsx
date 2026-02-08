@@ -18,7 +18,7 @@ const encodeGameState = (game: Game): string => {
   return btoa(encodeURIComponent(json));
 };
 
-const decodeGameState = (encoded: string): Game | null => {
+const _decodeGameState = (encoded: string): Game | null => {
   try {
     const json = decodeURIComponent(atob(encoded));
     return JSON.parse(json);
