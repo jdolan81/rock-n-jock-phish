@@ -18,15 +18,6 @@ const encodeGameState = (game: Game): string => {
   return btoa(encodeURIComponent(json));
 };
 
-const _decodeGameState = (encoded: string): Game | null => {
-  try {
-    const json = decodeURIComponent(atob(encoded));
-    return JSON.parse(json);
-  } catch (e) {
-    console.error("Failed to decode game state", e);
-    return null;
-  }
-};
 
 // --- Helper: Calculate completion (x/10 fields filled) ---
 const calculateCompletion = (picks: SongPicks): number => {
