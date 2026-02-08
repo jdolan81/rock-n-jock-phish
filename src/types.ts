@@ -51,4 +51,7 @@ export interface Game {
   // Phase 2: Live refresh
   lastRefreshed?: string;
   showStatus?: 'live' | 'final';
+  // Phase 3: Autosave + Resume
+  version?: number;
+  lastSaved?: string;
 }
