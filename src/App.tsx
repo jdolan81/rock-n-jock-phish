@@ -3,8 +3,14 @@ import { Game, Player, SongPicks, Setlist } from './types';
 import Layout from './components/Layout';
 import { ListSection, ListItem, PrimaryButton, IOSInput } from './components/IOSComponents';
 import AutocompleteInput from './components/AutocompleteInput';
+import ResumeModal from './components/ResumeModal';
 import * as scoring from './services/scoring';
 import { fetchLiveSetlist, fetchTourInsights, fetchShowDetails, fetchAllSongs, fetchRecentTourStats, SongInsight } from './services/setlistService';
+
+// Storage keys and version
+const STORAGE_KEY = 'rnj_current_game_state';
+const VERSION_KEY = 'rnj_current_game_version';
+const CURRENT_VERSION = 1;
 
 // --- Utility for Sharing State via URL ---
 const encodeGameState = (game: Game): string => {
@@ -45,36 +51,70 @@ const calculateCompletion = (picks: SongPicks): number => {
   return count;
 };
 
+// --- Helper: Autosave game state ---
+const autosaveGame = (game: Game | null) => {
+  if (!game) {
+    localStorage.removeItem(STORAGE_KEY);
+    localStorage.removeItem(VERSION_KEY);
+    return;
+  }
+  
+  try {
+    const gameWithTimestamp = {
+      ...game,
+      lastSaved: new Date().toISOString()
+    };
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(gameWithTimestamp));
+    localStorage.setItem(VERSION_KEY, CURRENT_VERSION.toString());
+  } catch (error) {
+    console.error('Failed to autosave:', error);
+  }
+};
+
+// --- Helper: Load saved game ---
+const loadSavedGame = (): Game | null => {
+  try {
+    const saved = localStorage.getItem(STORAGE_KEY);
+    if (!saved) return null;
+    
+    const game = JSON.parse(saved);
+    const version = parseInt(localStorage.getItem(VERSION_KEY) || '0');
+    
+    // Version check (for future migrations)
+    if (version !== CURRENT_VERSION) {
+      console.warn('Game version mismatch, clearing old state');
+      localStorage.removeItem(STORAGE_KEY);
+      localStorage.removeItem(VERSION_KEY);
+      return null;
+    }
+    
+    return game;
+  } catch (error) {
+    console.error('Failed to load saved game, clearing corrupted state:', error);
+    localStorage.removeItem(STORAGE_KEY);
+    localStorage.removeItem(VERSION_KEY);
+    return null;
+  }
+};
+
 // --- View Models ---
 const useGameViewModel = () => {
   const [insights, setInsights] = useState<SongInsight[]>([]);
   const [loadingInsights, setLoadingInsights] = useState(false);
-  const [game, setGame] = useState<Game | null>(() => {
-    const hash = window.location.hash;
-    if (hash.startsWith('#game=')) {
-      const encoded = hash.replace('#game=', '');
-      const decoded = decodeGameState(encoded);
-      if (decoded) {
-        window.history.replaceState(null, "", window.location.pathname);
-        return decoded;
-      }
-    }
-    const saved = localStorage.getItem('phish_game_state');
-    return saved ? JSON.parse(saved) : null;
-  });
+  const [game, setGame] = useState<Game | null>(null);
 
   useEffect(() => {
     if (game) {
-      localStorage.setItem('phish_game_state', JSON.stringify(game));
+      autosaveGame(game);
+      
       if (insights.length === 0) {
         const cached = localStorage.getItem(`phish_all_songs`);
         if (cached) {
           setInsights(JSON.parse(cached));
         }
       }
-    } else {
-      localStorage.removeItem('phish_game_state');
     }
+    // Don't clear on null - only clear when explicitly reset
   }, [game]);
 
   const refreshInsights = async (date: string) => {
@@ -102,6 +142,8 @@ const useGameViewModel = () => {
       status: 'lobby',
       venue,
       isLocked: false,
+      version: CURRENT_VERSION,
+      lastSaved: new Date().toISOString(),
     };
     setGame(newGame);
     
@@ -221,7 +263,7 @@ const useGameViewModel = () => {
     if (window.confirm("Are you sure? This deletes all current picks and players.")) {
       setGame(null);
       setInsights([]);
-      localStorage.removeItem('phish_game_state');
+      autosaveGame(null);
       return true;
     }
     return false;
@@ -277,10 +319,21 @@ const App: React.FC = () => {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [refreshCooldown, setRefreshCooldown] = useState(0);
   const [refreshError, setRefreshError] = useState<string | null>(null);
+  const [showResumeModal, setShowResumeModal] = useState(false);
+  const [savedGame, setSavedGame] = useState<Game | null>(null);
   
   const [showDate, setShowDate] = useState(new Date().toISOString().split('T')[0]);
   const [venueInfo, setVenueInfo] = useState<string>('');
   const [isFetchingVenue, setIsFetchingVenue] = useState(false);
+
+  // Check for saved game on mount
+  useEffect(() => {
+    const saved = loadSavedGame();
+    if (saved && !vm.game) {
+      setSavedGame(saved);
+      setShowResumeModal(true);
+    }
+  }, []);
 
   useEffect(() => {
     if (vm.game && currentView === View.HOME) {
@@ -300,53 +353,74 @@ const App: React.FC = () => {
     }
   }, [showDate, currentView]);
 
-const handleCalculateResults = async () => {
-  if (!vm.game) return;
-  
-  setIsCalculating(true);
-  
-  try {
-    const showDate = vm.game.lockTime;
-    console.log('🎯 Fetching setlist for show date:', showDate);
-    
-    const result = await fetchLiveSetlist(showDate);
-    console.log('📥 Setlist result:', result);
-    
-    if (result && result.setlist) {
-      console.log('📊 Setlist found:', result.setlist);
+  const handleResumeGame = () => {
+    if (savedGame) {
+      vm.setGame(savedGame);
+      setShowResumeModal(false);
       
-      // Calculate scores for all players
-      const updatedPlayers = vm.game.players.map(p => {
-        const { score, breakdown } = scoring.calculatePlayerScore(p.picks, result.setlist);
-        console.log(`Player ${p.name}: ${score} points`, breakdown);
-        return { ...p, score, breakdown };
-      });
-      
-      // Set initial status
-      const now = new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
-      const showStatus = result.setlist.encore.length > 0 ? 'final' : 'live';
-      
-      // Update game with scores AND setlist
-      vm.setGame({
-        ...vm.game,
-        players: updatedPlayers,
-        setlist: result.setlist,
-        lastRefreshed: now,
-        showStatus: showStatus as 'live' | 'final',
-        status: 'completed'
-      });
-      
-      setCurrentView(View.RESULTS);
-    } else {
-      alert('Could not fetch setlist from Phish.net. The show may not have occurred yet or data is unavailable.');
+      // Route based on game state
+      if (savedGame.status === 'completed' || savedGame.isLocked) {
+        setCurrentView(View.RESULTS);
+      } else {
+        setCurrentView(View.LOBBY);
+      }
     }
-  } catch (error) {
-    console.error('Error calculating results:', error);
-    alert('Error fetching setlist. Please try again.');
-  } finally {
-    setIsCalculating(false);
-  }
-};
+  };
+
+  const handleStartNewGame = () => {
+    setShowResumeModal(false);
+    setSavedGame(null);
+    autosaveGame(null);
+    setCurrentView(View.CREATE_GAME);
+  };
+
+  const handleCalculateResults = async () => {
+    if (!vm.game) return;
+    
+    setIsCalculating(true);
+    
+    try {
+      const showDate = vm.game.lockTime;
+      console.log('🎯 Fetching setlist for show date:', showDate);
+      
+      const result = await fetchLiveSetlist(showDate);
+      console.log('📥 Setlist result:', result);
+      
+      if (result && result.setlist) {
+        console.log('📊 Setlist found:', result.setlist);
+        
+        // Calculate scores for all players
+        const updatedPlayers = vm.game.players.map(p => {
+          const { score, breakdown } = scoring.calculatePlayerScore(p.picks, result.setlist);
+          console.log(`Player ${p.name}: ${score} points`, breakdown);
+          return { ...p, score, breakdown };
+        });
+        
+        // Set initial status
+        const now = new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+        const showStatus = result.setlist.encore.length > 0 ? 'final' : 'live';
+        
+        // Update game with scores AND setlist
+        vm.setGame({
+          ...vm.game,
+          players: updatedPlayers,
+          setlist: result.setlist,
+          lastRefreshed: now,
+          showStatus: showStatus as 'live' | 'final',
+          status: 'completed'
+        });
+        
+        setCurrentView(View.RESULTS);
+      } else {
+        alert('Could not fetch setlist from Phish.net. The show may not have occurred yet or data is unavailable.');
+      }
+    } catch (error) {
+      console.error('Error calculating results:', error);
+      alert('Error fetching setlist. Please try again.');
+    } finally {
+      setIsCalculating(false);
+    }
+  };
 
   const handleRefresh = async () => {
     if (!vm.game || isRefreshing || refreshCooldown > 0) return;
@@ -372,11 +446,17 @@ const handleCalculateResults = async () => {
         
         if (newTotal > oldTotal) {
           console.log('🎉 New songs found!', newTotal - oldTotal, 'new songs');
-          vm.finalizeScores(newSetlist);
           
-          // Update last refreshed time and status
+          // Recalculate scores with new setlist
+          const updatedPlayers = vm.game.players.map(p => {
+            const { score, breakdown } = scoring.calculatePlayerScore(p.picks, newSetlist);
+            return { ...p, score, breakdown };
+          });
+          
+          // Update game state with new scores
           vm.setGame({
             ...vm.game,
+            players: updatedPlayers,
             lastRefreshed: now,
             showStatus: newSetlist.encore.length > 0 ? 'final' : 'live',
             setlist: newSetlist
@@ -415,15 +495,15 @@ const handleCalculateResults = async () => {
     }
   };
 
-const handleCopyLink = () => {
-  const link = vm.generateShareLink();
-  navigator.clipboard.writeText(link).then(() => {
-    setCopyFeedback(true);
-    setTimeout(() => setCopyFeedback(false), 2000);
-  });
-};
+  const handleCopyLink = () => {
+    const link = vm.generateShareLink();
+    navigator.clipboard.writeText(link).then(() => {
+      setCopyFeedback(true);
+      setTimeout(() => setCopyFeedback(false), 2000);
+    });
+  };
 
-const handleReset = () => {  
+  const handleReset = () => {
     if (vm.resetGame()) {
       setVenueInfo('');
       setCurrentView(View.CREATE_GAME);
@@ -499,6 +579,11 @@ const handleReset = () => {
             {vm.game.isLocked && (
               <div className="mt-2 inline-block bg-red-100 text-red-700 px-3 py-1 rounded-full text-xs font-bold">
                 🔒 LOCKED
+              </div>
+            )}
+            {vm.game.lastSaved && (
+              <div className="mt-1 text-xs text-gray-400">
+                💾 Saved {new Date(vm.game.lastSaved).toLocaleTimeString()}
               </div>
             )}
           </div>
@@ -829,6 +914,11 @@ const handleReset = () => {
             Last updated: {vm.game.lastRefreshed}
           </div>
         )}
+        {vm.game?.lastSaved && (
+          <div className="text-center text-xs text-gray-400 mb-2">
+            💾 Saved {new Date(vm.game.lastSaved).toLocaleTimeString()}
+          </div>
+        )}
         {refreshError && (
           <div className="text-center text-xs text-orange-600 mb-2">
             {refreshError}
@@ -934,13 +1024,31 @@ const handleReset = () => {
     );
   };
 
-  switch (currentView) {
-    case View.CREATE_GAME: return renderCreateGame();
-    case View.LOBBY: return renderLobby();
-    case View.PICKS: return renderPicks();
-    case View.RESULTS: return renderResults();
-    default: return renderHome();
-  }
+  return (
+    <>
+      {showResumeModal && savedGame && (
+        <ResumeModal
+          onResume={handleResumeGame}
+          onStartNew={handleStartNewGame}
+          gameInfo={{
+            playerCount: savedGame.players.length,
+            isLocked: savedGame.isLocked,
+            venue: savedGame.venue
+          }}
+        />
+      )}
+      
+      {(() => {
+        switch (currentView) {
+          case View.CREATE_GAME: return renderCreateGame();
+          case View.LOBBY: return renderLobby();
+          case View.PICKS: return renderPicks();
+          case View.RESULTS: return renderResults();
+          default: return renderHome();
+        }
+      })()}
+    </>
+  );
 };
 
 export default App;
